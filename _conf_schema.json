@@ -1,0 +1,330 @@
+{
+  "basic": {
+    "description": "开始使用",
+    "type": "object",
+    "hint": "先开启哨兵并选择保护范围。默认的检查、恢复和补发参数可直接使用；它与光谱的生活冻结分别控制。",
+    "items": {
+      "enabled": {
+        "description": "启用投递哨兵",
+        "type": "bool",
+        "default": false,
+        "hint": "检查 QQ 消息是否真正送达，已知无法发送时暂缓模型回应，并保留待补发内容。适用于 OneBot/aiocqhttp 连接；关闭后不拦截。"
+      },
+      "scope": {
+        "description": "保护范围",
+        "type": "string",
+        "default": "all",
+        "options": [
+          "all",
+          "group",
+          "private"
+        ],
+        "labels": [
+          "私聊与群聊",
+          "仅群聊",
+          "仅私聊"
+        ],
+        "hint": "选择同时保护私聊与群聊，或只保护其中一种。不会修改其他会话的发送方式。"
+      }
+    }
+  },
+  "detection": {
+    "description": "发现发送故障",
+    "type": "object",
+    "hint": "结合群禁言检查和真实发送结果，判断消息能否送达。",
+    "items": {
+      "probe_groups": {
+        "description": "检查机器人是否被群禁言",
+        "type": "bool",
+        "default": true,
+        "hint": "通过机器人连接查询自身的群禁言状态。关闭后主要根据真实发送失败发现问题。"
+      },
+      "probe_all_shut": {
+        "description": "同时检查全员禁言",
+        "type": "bool",
+        "default": true,
+        "hint": "检查群全员禁言是否影响机器人发送。需要上面的群禁言检查开启，管理员身份也参与判断。"
+      },
+      "probe_interval_seconds": {
+        "description": "正常群聊检查间隔（秒）",
+        "type": "int",
+        "default": 120,
+        "hint": "状态正常的群多久检查一次发送权限。0 表示关闭定期检查；仍可通过其他检查与发送结果发现异常。"
+      },
+      "track_outcome": {
+        "description": "跟踪真实发送结果",
+        "type": "bool",
+        "default": true,
+        "hint": "观察主回复真正发送时的成功或失败。私聊没有通用的禁言检查接口，通常保持开启。"
+      },
+      "max_fail_streak": {
+        "description": "判定不可送达的连续失败次数",
+        "type": "int",
+        "default": 3,
+        "hint": "真实发送连续失败达到此次数后，认为该会话暂时不可送达，并暂停该会话的常规回应。"
+      }
+    }
+  },
+  "recovery": {
+    "description": "恢复与重试",
+    "type": "object",
+    "hint": "发送恢复后重新开放会话。群聊可查询权限；私聊往往需要通过实际试探发送判断。",
+    "items": {
+      "recovery_poll_seconds": {
+        "description": "异常会话恢复检查间隔（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "已经无法送达的会话多久检查一次恢复。群聊可检查权限，私聊恢复可能需要试探补发。"
+      },
+      "recovery_confirm_times": {
+        "description": "确认恢复的连续成功次数",
+        "type": "int",
+        "default": 2,
+        "hint": "连续确认可以发送多少次后恢复，减少连接状态反复变化造成的误判。"
+      },
+      "probe_retry_enabled": {
+        "description": "私聊补发失败后降低重试频率",
+        "type": "bool",
+        "default": true,
+        "hint": "私聊恢复试探连续失败时，改为间隔更久再试。通常保持开启，避免反复尝试发送。"
+      },
+      "probe_retry_fail_limit": {
+        "description": "降低重试频率前的失败次数",
+        "type": "int",
+        "default": 3,
+        "hint": "恢复试探连续失败多少次后使用下面的等待间隔。0 表示不按失败次数限制试探。"
+      },
+      "probe_retry_backoff_minutes": {
+        "description": "降低频率后的等待（分钟）",
+        "type": "int",
+        "default": 10,
+        "hint": "达到失败次数后，每隔多久再试探补发。0 表示停止自动试探，可用“/哨兵 flush”手动补发。"
+      }
+    }
+  },
+  "outbox": {
+    "description": "积压消息补发",
+    "type": "object",
+    "hint": "只补发仍在有效期内的内容。条数和时间限制避免恢复后集中发送过多旧消息。",
+    "items": {
+      "outbox_ttl_minutes": {
+        "description": "待补发内容有效期（分钟）",
+        "type": "int",
+        "default": 30,
+        "hint": "内容超过此时长后不再补发，避免恢复后发送已经过时的消息。"
+      },
+      "flush_batch_max": {
+        "description": "每批最多补发的条数",
+        "type": "int",
+        "default": 5,
+        "hint": "一次补发最多处理多少条有效消息。超出本批上限的内容仍留在队列，不会因此自动删除；过期内容不再补发。"
+      },
+      "flush_throttle_seconds": {
+        "description": "两条补发消息之间的间隔（秒）",
+        "type": "int",
+        "default": 4,
+        "hint": "恢复后逐条补发的最短间隔，避免积压内容同时发出。"
+      },
+      "flush_announce_text": {
+        "description": "补发前的说明文字（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空不额外发送说明。填写后会先发送这句话，例如“刚才没发出去，补给你”。"
+      }
+    }
+  },
+  "context": {
+    "description": "接上错过的对话",
+    "type": "object",
+    "hint": "控制恢复后提供给模型的未读来信背景，不改变光谱的长期记忆设置。",
+    "items": {
+      "brief_on_recovery": {
+        "description": "恢复后提供错过的来信",
+        "type": "bool",
+        "default": true,
+        "hint": "恢复后的第一轮，将无法回应期间收到的消息作为背景提供给模型，帮助接上对话。它不会逐条强制回复。"
+      },
+      "max_brief_items": {
+        "description": "错过来信的提供条数",
+        "type": "int",
+        "default": 8,
+        "hint": "恢复后最多提供多少条错过的来信。仅在提供错过来信开启时生效，增加条数会增加请求长度。"
+      }
+    }
+  },
+  "maintenance": {
+    "description": "检查频率与日志",
+    "type": "object",
+    "hint": "通常保留默认检查间隔，日志详情只在排查时开启。",
+    "items": {
+      "tick_seconds": {
+        "description": "后台检查间隔（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "后台检查恢复与补发任务的频率，实际最短 5 秒。通常保留默认值。"
+      },
+      "debug": {
+        "description": "记录检查详情（排查用）",
+        "type": "bool",
+        "default": false,
+        "hint": "记录更多检查和发送状态信息，方便排查禁言或连接问题。日常保持关闭。"
+      }
+    }
+  },
+  "enabled": {
+    "description": "启用投递哨兵",
+    "type": "bool",
+    "default": false,
+    "hint": "检查 QQ 消息是否真正送达，已知无法发送时暂缓模型回应，并保留待补发内容。适用于 OneBot/aiocqhttp 连接；关闭后不拦截。",
+    "invisible": true
+  },
+  "scope": {
+    "description": "保护范围",
+    "type": "string",
+    "default": "all",
+    "options": [
+      "all",
+      "group",
+      "private"
+    ],
+    "labels": [
+      "私聊与群聊",
+      "仅群聊",
+      "仅私聊"
+    ],
+    "hint": "选择同时保护私聊与群聊，或只保护其中一种。不会修改其他会话的发送方式。",
+    "invisible": true
+  },
+  "probe_groups": {
+    "description": "检查机器人是否被群禁言",
+    "type": "bool",
+    "default": true,
+    "hint": "通过机器人连接查询自身的群禁言状态。关闭后主要根据真实发送失败发现问题。",
+    "invisible": true
+  },
+  "probe_all_shut": {
+    "description": "同时检查全员禁言",
+    "type": "bool",
+    "default": true,
+    "hint": "检查群全员禁言是否影响机器人发送。需要上面的群禁言检查开启，管理员身份也参与判断。",
+    "invisible": true
+  },
+  "probe_interval_seconds": {
+    "description": "正常群聊检查间隔（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "状态正常的群多久检查一次发送权限。0 表示关闭定期检查；仍可通过其他检查与发送结果发现异常。",
+    "invisible": true
+  },
+  "recovery_poll_seconds": {
+    "description": "异常会话恢复检查间隔（秒）",
+    "type": "int",
+    "default": 15,
+    "hint": "已经无法送达的会话多久检查一次恢复。群聊可检查权限，私聊恢复可能需要试探补发。",
+    "invisible": true
+  },
+  "recovery_confirm_times": {
+    "description": "确认恢复的连续成功次数",
+    "type": "int",
+    "default": 2,
+    "hint": "连续确认可以发送多少次后恢复，减少连接状态反复变化造成的误判。",
+    "invisible": true
+  },
+  "probe_retry_enabled": {
+    "description": "私聊补发失败后降低重试频率",
+    "type": "bool",
+    "default": true,
+    "hint": "私聊恢复试探连续失败时，改为间隔更久再试。通常保持开启，避免反复尝试发送。",
+    "invisible": true
+  },
+  "probe_retry_fail_limit": {
+    "description": "降低重试频率前的失败次数",
+    "type": "int",
+    "default": 3,
+    "hint": "恢复试探连续失败多少次后使用下面的等待间隔。0 表示不按失败次数限制试探。",
+    "invisible": true
+  },
+  "probe_retry_backoff_minutes": {
+    "description": "降低频率后的等待（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "达到失败次数后，每隔多久再试探补发。0 表示停止自动试探，可用“/哨兵 flush”手动补发。",
+    "invisible": true
+  },
+  "outbox_ttl_minutes": {
+    "description": "待补发内容有效期（分钟）",
+    "type": "int",
+    "default": 30,
+    "hint": "内容超过此时长后不再补发，避免恢复后发送已经过时的消息。",
+    "invisible": true
+  },
+  "flush_throttle_seconds": {
+    "description": "两条补发消息之间的间隔（秒）",
+    "type": "int",
+    "default": 4,
+    "hint": "恢复后逐条补发的最短间隔，避免积压内容同时发出。",
+    "invisible": true
+  },
+  "flush_batch_max": {
+    "description": "每批最多补发的条数",
+    "type": "int",
+    "default": 5,
+    "hint": "一次补发最多处理多少条有效消息。超出本批上限的内容仍留在队列，不会因此自动删除；过期内容不再补发。",
+    "invisible": true
+  },
+  "flush_announce_text": {
+    "description": "补发前的说明文字（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空不额外发送说明。填写后会先发送这句话，例如“刚才没发出去，补给你”。",
+    "invisible": true
+  },
+  "brief_on_recovery": {
+    "description": "恢复后提供错过的来信",
+    "type": "bool",
+    "default": true,
+    "hint": "恢复后的第一轮，将无法回应期间收到的消息作为背景提供给模型，帮助接上对话。它不会逐条强制回复。",
+    "invisible": true
+  },
+  "max_brief_items": {
+    "description": "错过来信的提供条数",
+    "type": "int",
+    "default": 8,
+    "hint": "恢复后最多提供多少条错过的来信。仅在提供错过来信开启时生效，增加条数会增加请求长度。",
+    "invisible": true
+  },
+  "track_outcome": {
+    "description": "跟踪真实发送结果",
+    "type": "bool",
+    "default": true,
+    "hint": "观察主回复真正发送时的成功或失败。私聊没有通用的禁言检查接口，通常保持开启。",
+    "invisible": true
+  },
+  "max_fail_streak": {
+    "description": "判定不可送达的连续失败次数",
+    "type": "int",
+    "default": 3,
+    "hint": "真实发送连续失败达到此次数后，认为该会话暂时不可送达，并暂停该会话的常规回应。",
+    "invisible": true
+  },
+  "tick_seconds": {
+    "description": "后台检查间隔（秒）",
+    "type": "int",
+    "default": 15,
+    "hint": "后台检查恢复与补发任务的频率，实际最短 5 秒。通常保留默认值。",
+    "invisible": true
+  },
+  "debug": {
+    "description": "记录检查详情（排查用）",
+    "type": "bool",
+    "default": false,
+    "hint": "记录更多检查和发送状态信息，方便排查禁言或连接问题。日常保持关闭。",
+    "invisible": true
+  },
+  "settings_layout_version": {
+    "description": "配置布局版本",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  }
+}
