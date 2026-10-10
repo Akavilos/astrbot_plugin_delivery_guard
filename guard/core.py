@@ -8,12 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except Exception:
-    import logging
-
-    logger = logging.getLogger("delivery_guard")
+from astrbot.api import logger
 
 
 class DeliveryBlocked(Exception):

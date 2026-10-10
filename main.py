@@ -10,6 +10,7 @@ import time
 
 import astrbot.api.star as star
 from astrbot.api import logger
+from astrbot.core.agent.message import TextPart
 from astrbot.api.event import AstrMessageEvent, filter
 
 from .guard.core import GuardCore, extract_text
@@ -22,7 +23,7 @@ PLUGIN_NAME = "astrbot_plugin_delivery_guard"
 PRIORITY = 100
 
 
-@star.register(PLUGIN_NAME, "Akavilos", "投递哨兵 · Delivery Guard", "0.1.1")
+@star.register(PLUGIN_NAME, "Akavilos", "投递哨兵 · Delivery Guard", "0.1.2")
 class DeliveryGuardPlugin(star.Star):
     def __init__(self, context: star.Context, config: dict | None = None) -> None:
         super().__init__(context)
@@ -219,7 +220,7 @@ class DeliveryGuardPlugin(star.Star):
             brief = self.core.build_brief(umo)
             if not brief:
                 return
-            req.system_prompt = f"{req.system_prompt or ''}\n\n{brief}"
+            req.extra_user_content_parts.append(TextPart(text=brief).mark_as_temp())
         except Exception:
             logger.exception("[guard] 缺席期背景注入失败")
 
