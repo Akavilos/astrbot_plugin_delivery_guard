@@ -35,6 +35,8 @@ class Flusher:
         if status == "ok":
             self._probe_fail_reset(umo)
             await self._healthy_probe(umo, now)
+            if self.store.get_status(umo) == "ok" and self.store.count_outbox(umo):
+                await self._flush(umo)
             return
 
 
@@ -47,50 +49,18 @@ class Flusher:
         self.store.set_state(umo, "last_probe", repr(now))
 
 
-        if status == "muted":
-
-
+        ok = await self.core.probe(umo)
+        if ok is False:
+            self.store.set_state(umo, "recover_streak", "0")
+            self._note_probe_detail(umo)
+            return
+        if ok is None:
             until = self.store.get_mute_until(umo)
-            ok = await self.core.probe(umo)
-            if ok is True:
-                pass
-            elif ok is None:
-
-                if until and now < until:
-                    return
-                logger.info("[guard] %s 禁言无权威真值且已到缓存时刻，放行试探", umo)
-                self.core.set_ok(umo)
-                await self._flush(umo)
+            if until and now < until:
                 return
-            else:
-
-
-                if until and now >= until:
-                    logger.info("[guard] %s 已过缓存解禁时刻但探测仍报禁言，放行试探", umo)
-                    self.core.set_ok(umo)
-                    await self._flush(umo)
-                    return
-                self.store.set_state(umo, "recover_streak", "0")
-
-                self._note_probe_detail(umo)
-                return
-        else:
-            ok = await self.core.probe(umo)
-            if ok is False:
-                self.store.set_state(umo, "recover_streak", "0")
-                return
-            if ok is None:
-
-
-                if not self.store.count_outbox(umo):
-                    return
-
-                if not self._probe_retry_allowed(umo, now):
-                    return
-                self.core.set_ok(umo)
-                await self._flush(umo)
-                return
-
+            if self.store.count_outbox(umo) and self._probe_retry_allowed(umo, now):
+                await self._flush(umo, probe_run=True)
+            return
 
         n = self.store.bump_recover_streak(umo)
         need = int(self._cfg("recovery_confirm_times", 2))
@@ -260,10 +230,10 @@ class Flusher:
         if not text or not text.strip():
             return True
         try:
-            from astrbot.core.message.message_event_result import MessageChain
+            from astrbot.api.event import MessageChain
             from astrbot.api.message_components import Plain
 
-            await self.context.send_message(umo, MessageChain(chain=[Plain(text)]))
+            await self.context.send_message(umo, MessageChain(chain=[Plain(text)]), replay=True)
         except Exception as e:
             logger.warning("[guard] 补发失败 %s：%s", umo, e)
             return False

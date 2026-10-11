@@ -1,8 +1,8 @@
 name: "astrbot_plugin_delivery_guard"
 display_name: "投递哨兵 · Delivery Guard"
 author: Akavilos
-version: "0.1.2"
-desc: "识别群禁言与消息发送故障，记录缺席来信，恢复后按有效期与批次补发积压内容。"
+version: "0.1.3"
+desc: "检查群禁言，记录缺席来信，通过公开事件与协作发送接口暂存文字并在恢复后补发。"
 repo: https://github.com/Akavilos/astrbot_plugin_delivery_guard
 astrbot_version: ">=4.24.0"
 support_platforms:

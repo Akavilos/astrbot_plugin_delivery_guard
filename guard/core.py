@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from astrbot.api import logger
+from astrbot.api.message_components import Plain
 
 
 class DeliveryBlocked(Exception):
@@ -16,15 +17,7 @@ class DeliveryBlocked(Exception):
 
 
 def extract_text(chain: Any) -> str:
-    parts: list[str] = []
-    try:
-        for comp in getattr(chain, "chain", None) or []:
-            text = getattr(comp, "text", None)
-            if text and type(comp).__name__ == "Plain":
-                parts.append(text)
-    except Exception:
-        pass
-    return "".join(parts).strip()
+    return "".join(comp.text for comp in chain.chain if isinstance(comp, Plain)).strip()
 
 
 @dataclass
@@ -49,40 +42,23 @@ class GuardCore:
         self.context = context
         self.store = store
         self._cfg = cfg
-        self._real_context = context
 
         self._cache: dict[str, tuple[float, bool]] = {}
 
 
-    @staticmethod
-    def _bot_self_id(bot: Any) -> str:
-        clients = getattr(bot, "_wsr_api_clients", None)
-        if isinstance(clients, dict) and clients:
-            for key in clients:
-                s = str(key)
-                if s.isdigit():
-                    return s
-        return ""
+    def remember_event(self, event) -> None:
+        """机器人身份来自公开事件，不读取连接库的内部字段。"""
+        self.store.set_state(event.unified_msg_origin, "bot_self_id", str(event.get_self_id()))
 
     def resolve(self, umo: str) -> Target | None:
         pname, mtype, sid = parse_umo(umo)
         if not pname:
             return None
-        platform = None
-        try:
-            for p in self.context.platform_manager.platform_insts:
-                try:
-                    if p.meta().id == pname:
-                        platform = p
-                        break
-                except Exception:
-                    continue
-        except Exception:
+        platform = self.context.get_platform_inst(pname)
+        if platform is None or platform.meta().name != "aiocqhttp":
             return None
-        if platform is None:
-            return None
-        bot = getattr(platform, "bot", None)
-        self_id = self._bot_self_id(bot) or str(getattr(platform, "self_id", "") or "")
+        bot = platform.get_client()
+        self_id = self.store.get_state(umo, "bot_self_id", "")
         is_group = mtype == "GroupMessage"
         return Target(
             platform=platform,
@@ -99,7 +75,6 @@ class GuardCore:
     def diagnostics(self, umo: str) -> dict:
         t = self.resolve(umo)
         bot = getattr(t, "bot", None) if t else None
-        api_clients = getattr(bot, "_wsr_api_clients", None) if bot is not None else None
         return {
             "umo": umo,
             "status": self.store.get_status(umo),
@@ -110,11 +85,10 @@ class GuardCore:
             "is_group": getattr(t, "is_group", None),
             "group_id": getattr(t, "group_id", ""),
             "self_id": getattr(t, "self_id", ""),
-            "bot_own_id": str(getattr(bot, "own_id", "") or "") if bot is not None else "",
-            "api_clients": (
-                list(api_clients.keys()) if isinstance(api_clients, dict) else
-                (f"<{type(api_clients).__name__}>" if api_clients is not None else None)
-            ),
+            "bot_own_id": getattr(t, "self_id", ""),
+            "api_clients": None,
+            "connection_registered": bot is not None,
+            "send_tracking": "explicit_guarded_send_and_replay",
             "sent_today": self.store.sent_today(umo),
         }
 
@@ -140,16 +114,23 @@ class GuardCore:
             self._diag(umo, f"群号不合法: {t.group_id!r}")
             return None
         if not t.self_id.isdigit():
-
-            self._diag(umo, f"拿不到机器人 self_id: {t.self_id!r}")
-            return None
+            try:
+                login = await t.bot.call_action("get_login_info")
+                t.self_id = str(login.get("user_id", ""))
+            except Exception as error:
+                logger.warning("[guard] 无法查询机器人身份：%s", error)
+                return None
+            if not t.self_id.isdigit():
+                return None
+            self.store.set_state(umo, "bot_self_id", t.self_id)
+        routing = {"self_id": int(t.self_id)}
 
         try:
             info = await t.bot.call_action(
                 "get_group_member_info",
                 group_id=int(t.group_id),
                 user_id=int(t.self_id),
-                no_cache=True,
+                no_cache=True, **routing,
             )
         except Exception as e:
 
@@ -188,7 +169,7 @@ class GuardCore:
             if role not in ("owner", "admin"):
                 try:
                     ginfo = await t.bot.call_action(
-                        "get_group_info", group_id=int(t.group_id), no_cache=True
+                        "get_group_info", group_id=int(t.group_id), no_cache=True, **routing
                     )
                 except Exception:
                     ginfo = None
@@ -220,22 +201,7 @@ class GuardCore:
         status = self.store.get_status(umo)
         if status == "ok":
             return False
-        if status == "muted":
-            until = self.store.get_mute_until(umo)
-
-            if until and now < until:
-                return True
-            return False
-
-
-        try:
-            last = float(self.store.get_state(umo, "last_canary", "0") or 0)
-        except (TypeError, ValueError):
-            last = 0.0
-        if now - last >= float(self._cfg("recovery_poll_seconds", 15)):
-            self.store.set_state(umo, "last_canary", repr(now))
-            logger.info("[guard] %s 放行一条探针消息，用于试探是否恢复", umo)
-            return False
+        # 恢复由后台查询或真实试发确认；不因时间流逝放行未确认的回复。
         return True
 
     async def on_send_failed(self, umo: str, chain: Any, err: BaseException) -> None:
@@ -250,13 +216,12 @@ class GuardCore:
                 logger.warning("[guard] %s 发送失败且探测确认被拦，已暂存 #%d：%.40s",
                                umo, oid, text)
             return
-        if status is None:
-            streak = self._bump_fail(umo)
-            if streak >= int(self._cfg("max_fail_streak", 3)):
-                if text:
-                    self.store.push_outbox(umo, text, "发送失败")
-                self.set_blocked(umo, f"发送连续失败 {streak} 次")
-                logger.warning("[guard] %s 连续 %d 次发送失败，判定不可达", umo, streak)
+        streak = self._bump_fail(umo)
+        if text:
+            self.store.push_outbox(umo, text, "发送失败")
+        if streak >= int(self._cfg("max_fail_streak", 3)):
+            self.set_blocked(umo, f"发送连续失败 {streak} 次")
+            logger.warning("[guard] %s 连续 %d 次发送失败，判定不可达", umo, streak)
 
     def _bump_fail(self, umo: str) -> int:
         n = int(self.store.get_state(umo, "fail_streak", "0") or 0) + 1
@@ -264,13 +229,10 @@ class GuardCore:
         return n
 
     def note_success(self, umo: str) -> None:
-        """清除失败计数，累计恢复确认并登记发送数量。"""
+        """仅由本插件发送接口的成功返回确认通路，查询仍使用连续确认次数。"""
         self.store.set_state(umo, "fail_streak", "0")
         if self.store.get_status(umo) != "ok":
-            n = self.store.bump_recover_streak(umo)
-            if n >= int(self._cfg("recovery_confirm_times", 2)):
-                logger.info("[guard] %s 发送成功，判定已恢复", umo)
-                self.set_ok(umo)
+            self.set_ok(umo)
         self.store.bump_sent(umo)
 
     def on_send_failed_sync(self, umo: str) -> None:
@@ -294,65 +256,6 @@ class GuardCore:
         self.store.set_state(umo, "last_canary", "0")
 
 
-    _orig_platform_send = None
-    _patched_class = None
-
-    def patch_platform_send(self) -> None:
-        """包装QQ平台实际发送入口，成功与异常分别更新送达跟踪。"""
-        if not self._cfg("track_outcome", True):
-            return
-        if self.__class__._patched_class is not None:
-            return
-        try:
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-                AiocqhttpMessageEvent,
-            )
-        except Exception:
-            logger.warning("[guard] 找不到 AiocqhttpMessageEvent，主回复结果跟踪不可用")
-            return
-
-
-        raw = AiocqhttpMessageEvent.__dict__["send_message"].__func__
-        guard = self
-
-        async def patched(cls, bot, message_chain, event=None, is_group=False,
-                          session_id=None):
-            umo = guard.umo_from_send(is_group, session_id)
-            try:
-                result = await raw(
-                    cls, bot, message_chain,
-                    event=event, is_group=is_group, session_id=session_id,
-                )
-            except BaseException as e:
-                await guard.on_send_failed(umo, message_chain, e)
-                raise
-            guard.note_success(umo)
-            return result
-
-        patched.__guard_patched__ = True
-        AiocqhttpMessageEvent.send_message = classmethod(patched)
-        type(self)._orig_platform_send = raw
-        type(self)._patched_class = AiocqhttpMessageEvent
-        logger.info("[guard] 已给 %s 打补丁，主回复发送结果可见",
-                    AiocqhttpMessageEvent.__name__)
-
-    def umo_from_send(self, is_group: bool, session_id: Any) -> str:
-        sid = str(session_id or "")
-        kind = "GroupMessage" if is_group else "FriendMessage"
-        return f"default:{kind}:{sid}"
-
-    def unpatch_platform_send(self) -> None:
-        cls = type(self)._patched_class
-        raw = type(self)._orig_platform_send
-        if cls is not None and raw is not None:
-            try:
-                cls.send_message = classmethod(raw)
-            except Exception:
-                logger.exception("[guard] 还原平台类方法失败")
-        type(self)._patched_class = None
-        type(self)._orig_platform_send = None
-
-
     def record_incoming(self, umo: str, sender: str, text: str) -> None:
         if not text or not text.strip():
             return
@@ -372,11 +275,11 @@ class GuardCore:
         self.store.set_state(umo, "need_brief", "0")
         if not rows:
             return ""
-        lines = ["【投递哨兵】前面这段时间消息没能送达给你，现在恢复了。",
-                 "下面这些是你没收到的那段里，对方发过来的："]
-        for r in rows:
-            who = (r["sender"] or "对方").strip()
-            lines.append(f"· {who}：{r['text']}")
-        lines.append("这些是刚补上的上下文，不用逐条回应，按平时的节奏来就好。")
+        lines = ["【我的通信恢复背景】此前一段时间，我的消息未能送达。", "以下是我尚未回应的历史来信："]
+        for row in rows:
+            who = (row["sender"] or "对方").strip()
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["ts"]))
+            lines.append(f"· [{when}] {who}：{row['text']}")
+        lines.append("我补看的是过去的来信，时间和人物归属保持原样。")
         logger.info("[guard] %s 注入缺席期背景 %d 条", umo, len(rows))
         return "\n".join(lines)

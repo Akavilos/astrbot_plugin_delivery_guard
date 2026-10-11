@@ -8,7 +8,7 @@
         "description": "启用投递哨兵",
         "type": "bool",
         "default": false,
-        "hint": "检查 QQ 消息是否真正送达，已知无法发送时暂缓模型回应，并保留待补发内容。适用于 OneBot/aiocqhttp 连接；关闭后不拦截。"
+        "hint": "通过公开事件检查已知群禁言和不可达状态，暂停相关模型回复，并保存缺席来信；不替换框架或其他插件的发送方法。"
       },
       "scope": {
         "description": "保护范围",
@@ -52,10 +52,10 @@
         "hint": "状态正常的群多久检查一次发送权限。0 表示关闭定期检查；仍可通过其他检查与发送结果发现异常。"
       },
       "track_outcome": {
-        "description": "跟踪真实发送结果",
+        "description": "跟踪协作发送的结果",
         "type": "bool",
         "default": true,
-        "hint": "观察主回复真正发送时的成功或失败。私聊没有通用的禁言检查接口，通常保持开启。"
+        "hint": "记录通过本插件 send_guarded 接口发送的成功与失败。框架默认发送和未接入该接口的其他插件不受全局接管；补发队列仍按真实结果处理。"
       },
       "max_fail_streak": {
         "description": "判定不可送达的连续失败次数",
@@ -175,7 +175,7 @@
     "description": "启用投递哨兵",
     "type": "bool",
     "default": false,
-    "hint": "检查 QQ 消息是否真正送达，已知无法发送时暂缓模型回应，并保留待补发内容。适用于 OneBot/aiocqhttp 连接；关闭后不拦截。",
+    "hint": "通过公开事件检查已知群禁言和不可达状态，暂停相关模型回复，并保存缺席来信；不替换框架或其他插件的发送方法。",
     "invisible": true
   },
   "scope": {
@@ -294,10 +294,10 @@
     "invisible": true
   },
   "track_outcome": {
-    "description": "跟踪真实发送结果",
+    "description": "跟踪协作发送的结果",
     "type": "bool",
     "default": true,
-    "hint": "观察主回复真正发送时的成功或失败。私聊没有通用的禁言检查接口，通常保持开启。",
+    "hint": "记录通过本插件 send_guarded 接口发送的成功与失败。框架默认发送和未接入该接口的其他插件不受全局接管；补发队列仍按真实结果处理。",
     "invisible": true
   },
   "max_fail_streak": {

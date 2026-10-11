@@ -1,5 +1,5 @@
 """投递哨兵框架入口：拦截不可送达会话、保存缺席来信并追加恢复背景。
-配置与数据独立保存，发送拦截包装框架入口和QQ平台发送入口。"""
+配置与数据独立保存，使用公开事件和协作发送接口，不替换框架发送方法。"""
 
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 
 from .guard.core import GuardCore, extract_text
 from .guard.flush import Flusher
+from .guard.send import GuardSender
 from .guard.store import Store
 
 PLUGIN_NAME = "astrbot_plugin_delivery_guard"
@@ -23,7 +24,7 @@ PLUGIN_NAME = "astrbot_plugin_delivery_guard"
 PRIORITY = 100
 
 
-@star.register(PLUGIN_NAME, "Akavilos", "投递哨兵 · Delivery Guard", "0.1.2")
+@star.register(PLUGIN_NAME, "Akavilos", "投递哨兵 · Delivery Guard", "0.1.3")
 class DeliveryGuardPlugin(star.Star):
     def __init__(self, context: star.Context, config: dict | None = None) -> None:
         super().__init__(context)
@@ -33,15 +34,11 @@ class DeliveryGuardPlugin(star.Star):
         self.store = Store(self.data_dir / "guard.db")
 
 
-        self._real_context = self.context
         self.core = GuardCore(self.context, self.store, self._cfg)
-        self.flusher = Flusher(self._real_context, self.store, self.core, self._cfg)
+        self.sender = GuardSender(self.context, self.store, self.core, self._cfg)
+        self.flusher = Flusher(self.sender, self.store, self.core, self._cfg)
 
         self._tick_task: asyncio.Task | None = None
-        self._orig_send_message = None
-
-        self._patch_context_send()
-        self.core.patch_platform_send()
 
 
     def _cfg(self, key: str, default):
@@ -49,51 +46,6 @@ class DeliveryGuardPlugin(star.Star):
 
     def _enabled(self) -> bool:
         return bool(self._cfg("enabled", False))
-
-
-    def _patch_context_send(self) -> None:
-        """包装框架主动发送；不可送达时暂存并抛出阻断异常。"""
-        orig = getattr(self.context, "send_message", None)
-        if orig is None:
-            logger.warning("[guard] 找不到 Context.send_message，拦截层不可用")
-            return
-
-
-        if getattr(orig, "__guard_wrapped__", False):
-            inner = getattr(orig, "__guard_orig__", None)
-            if inner is None:
-                logger.warning("[guard] send_message 已被包装但拿不到原函数，跳过")
-                return
-            orig = inner
-        guard = self
-
-        async def _send_message(session, message_chain, *args, **kwargs):
-            umo = session if isinstance(session, str) else str(getattr(session, "session_id", session))
-            if guard._enabled() and guard.core.should_block(umo):
-                text = extract_text(message_chain)
-                oid = guard.store.push_outbox(umo, text, "会话不可送达")
-                logger.warning(
-                    "[guard] 拦截出站消息（会话不可送达，暂存 #%d）：%.40s", oid, text
-                )
-
-                from .guard.core import DeliveryBlocked
-
-                raise DeliveryBlocked(f"会话当前不可送达：{umo}")
-            try:
-                result = await orig(session, message_chain, *args, **kwargs)
-            except BaseException as e:
-                await guard.core.on_send_failed(umo, message_chain, e)
-                raise
-            guard.core.note_success(umo)
-            return result
-
-        _send_message.__guard_wrapped__ = True
-        _send_message.__guard_orig__ = orig
-        self._orig_send_message = orig
-        try:
-            self.context.send_message = _send_message
-        except Exception:
-            logger.exception("[guard] 包装 Context.send_message 失败，拦截层不可用")
 
 
     async def initialize(self) -> None:
@@ -106,21 +58,10 @@ class DeliveryGuardPlugin(star.Star):
             self._tick_task.cancel()
             try:
                 await self._tick_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
 
 
-        try:
-            cur = getattr(self.context, "send_message", None)
-            if cur is not None and getattr(cur, "__guard_wrapped__", False) \
-                    and self._orig_send_message is not None:
-                self.context.send_message = self._orig_send_message
-        except Exception:
-            logger.exception("[guard] 还原 Context.send_message 失败")
-        try:
-            self.core.unpatch_platform_send()
-        except Exception:
-            logger.exception("[guard] 还原平台类方法失败")
         self.store.close()
         logger.info("[guard] 已卸载。")
 
@@ -144,6 +85,7 @@ class DeliveryGuardPlugin(star.Star):
             if not self._enabled():
                 return
             umo = event.unified_msg_origin
+            self.core.remember_event(event)
             if not self.core.in_scope(umo):
                 return
 
@@ -200,13 +142,35 @@ class DeliveryGuardPlugin(star.Star):
         self.store.set_state(umo, "last_probe", repr(time.time()))
         await self.core.probe(umo)
 
-    @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent) -> None:
-        try:
-            if self._enabled() and self.core.in_scope(event.unified_msg_origin):
-                self.core.note_success(event.unified_msg_origin)
-        except Exception:
-            logger.exception("[guard] after_message_sent 出错")
+
+    async def send_guarded(self, session: str, message_chain):
+        """合作插件可显式调用本接口，获得暂存、失败记录与真实发送结果。"""
+        return await self.sender.send_message(session, message_chain)
+
+    @filter.on_decorating_result(priority=-1000)
+    async def guard_result(self, event: AstrMessageEvent) -> None:
+        """发送前再次核查已知不可达状态，暂存文字，不接管框架正常发送。"""
+        if not self._enabled() or event.get_extra("_guard_management", False):
+            return
+        umo = event.unified_msg_origin
+        if not self.core.in_scope(umo):
+            return
+        self.core.remember_event(event)
+        await self._maybe_probe(umo)
+        if not self.core.should_block(umo):
+            return
+        result = event.get_result()
+        if result is None:
+            return
+        if not event.get_extra("_guard_result_queued", False):
+            text = extract_text(result)
+            if text:
+                self.store.push_outbox(umo, text, "发送前确认会话不可送达")
+            if any(type(part).__name__ != "Plain" for part in result.chain):
+                logger.warning("[guard] 被拦消息包含媒体；待发队列只保存文字，媒体不会自动补发")
+            event.set_extra("_guard_result_queued", True)
+        result.chain = []
+        event.stop_event()
 
     @filter.on_llm_request(priority=-1000)
     async def inject_brief(self, event: AstrMessageEvent, req) -> None:
@@ -229,6 +193,8 @@ class DeliveryGuardPlugin(star.Star):
     async def guard_cmd(self, event: AstrMessageEvent, action: str = ""):
         """查看、探测、补发或标记会话；clear处理收件，on/off控制送达状态。"""
         umo = event.unified_msg_origin
+        self.core.remember_event(event)
+        event.set_extra("_guard_management", True)
         a = (action or "").strip().lower()
 
         if a == "diag":
